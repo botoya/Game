@@ -28,6 +28,7 @@ const SPECIAL_POSITIONS: &[(usize, usize)] = &[(8usize, 2usize), (15usize, 2usiz
 
 enum Screen {
     Menu,
+    GameOver,
     Playing,
 }
 
@@ -66,6 +67,26 @@ struct GameState {
     level_offset_y: f32,
     // positions where coin has been collected; won't respawn there
     consumed_coin_positions: Vec<(usize, usize)>,
+    // monsters (enemies)
+    monsters: Vec<Monster>,
+    monster_img: Image,
+}
+
+// 小怪兽结构体：带有巡逻范围
+struct Monster {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    vx: f32,
+    range_min: f32,
+    range_max: f32,
+}
+
+impl Monster {
+    fn rect(&self) -> graphics::Rect {
+        graphics::Rect::new(self.x, self.y, self.w, self.h)
+    }
 }
 
 impl GameState {
@@ -101,6 +122,8 @@ impl GameState {
     let player_img = Image::new(ctx, "/player.png")?;
     let special_img = Image::new(ctx, "/special_block.png")?;
     let coin_img = Image::new(ctx, "/coin.png")?;
+    // 怪物素材（resources/boast.png）
+    let monster_img = Image::new(ctx, "/boast.png")?;
 
         let player = Player {
             x: 50.0,
@@ -111,6 +134,15 @@ impl GameState {
             vy: 0.0,
             on_ground: false,
         };
+
+        // 在靠近地面的地方生成一个巡逻怪
+        let mut monsters = Vec::new();
+        // 找到第一个靠近底部的 tile，用其上方生成怪物
+        if let Some(t) = tiles.iter().find(|t| t.y >= (offset_y + (level.len() as f32 - 1.0) * TILE_SIZE) - 1.0) {
+            let mx = t.x + 4.0;
+            let my = t.y - 24.0;
+            monsters.push(Monster { x: mx, y: my, w: 24.0, h: 24.0, vx: 60.0, range_min: t.x, range_max: t.x + TILE_SIZE * 4.0 });
+        }
 
     // 添加几个特殊方块（示例放在第 3 行和第 4 行的特定列）
     let special_positions = SPECIAL_POSITIONS;
@@ -138,6 +170,8 @@ impl GameState {
             coin_spawn_interval: 5.0,
             level_offset_y: offset_y,
             consumed_coin_positions: Vec::new(),
+            monsters,
+            monster_img,
         })
     }
 
@@ -168,6 +202,13 @@ impl GameState {
         self.score = 0;
         self.coin_spawn_timer = 0.0;
         self.player = Player { x:50.0, y:50.0, w:24.0, h:30.0, vx:0.0, vy:0.0, on_ground:false };
+        // 重新生成怪物（简单策略：放在第一个底部 tile 上方）
+        self.monsters.clear();
+        if let Some(t) = self.tiles.iter().find(|t| t.y >= (self.level_offset_y + (LEVEL.len() as f32 - 1.0) * TILE_SIZE) - 1.0) {
+            let mx = t.x + 4.0;
+            let my = t.y - 24.0;
+            self.monsters.push(Monster { x: mx, y: my, w: 24.0, h: 24.0, vx: 60.0, range_min: t.x, range_max: t.x + TILE_SIZE * 4.0 });
+        }
     }
 
     // 重置玩家到初始状态（用于结束一把返回菜单）
@@ -181,6 +222,12 @@ impl GameState {
             vy: 0.0,
             on_ground: false,
         };
+        // 失败重置时也把怪物位置重置为初始
+        for m in &mut self.monsters {
+            m.vx = m.vx.abs();
+            // 将怪物放回 range_min
+            m.x = m.range_min + 4.0;
+        }
     }
 
     // 简单 AABB 碰撞检测
@@ -194,6 +241,9 @@ impl event::EventHandler for GameState {
         match self.screen {
             Screen::Menu => {
                 // 菜单无每帧逻辑（可加入动画）
+            }
+            Screen::GameOver => {
+                // 游戏结束时暂停一切游戏逻辑
             }
             Screen::Playing => {
                 let dt = timer::delta(ctx).as_secs_f32();
@@ -332,6 +382,40 @@ impl event::EventHandler for GameState {
                         true
                     }
                 });
+
+                // 更新怪物巡逻与与玩家碰撞检测
+                for m in &mut self.monsters {
+                    // 移动
+                    m.x += m.vx * dt;
+                    if m.x < m.range_min {
+                        m.x = m.range_min;
+                        m.vx = m.vx.abs();
+                    } else if m.x + m.w > m.range_max {
+                        m.x = m.range_max - m.w;
+                        m.vx = -m.vx.abs();
+                    }
+                    // 简单重力作用 (保持在 tile 上方)
+                    // 检查是否站在某个 tile 上
+                    let mut on_tile = false;
+                    for tile in &self.tiles {
+                        let mut mrect = m.rect();
+                        mrect.y += 1.0; // 向下检测
+                        if GameState::rect_intersect(&mrect, tile) {
+                            on_tile = true;
+                            // 将怪物固定在地面上
+                            m.y = tile.y - m.h;
+                            break;
+                        }
+                    }
+                    if !on_tile {
+                        // 自由落体
+                        m.y += GRAVITY * dt;
+                    }
+                    // 玩家碰撞检测 -> 进入 GameOver
+                    if GameState::rect_intersect(&self.player.rect(), &m.rect()) {
+                        self.screen = Screen::GameOver;
+                    }
+                }
             }
         }
 
@@ -447,6 +531,37 @@ impl event::EventHandler for GameState {
                 graphics::draw(ctx, &mesh, DrawParam::default())?;
                 let label = graphics::Text::new("QUIT");
                 graphics::draw(ctx, &label, DrawParam::default().dest([bx + 18.0, by + 6.0]))?;
+
+                // 绘制怪物
+                for m in &self.monsters {
+                    let sx = m.w / (self.monster_img.width() as f32);
+                    let sy = m.h / (self.monster_img.height() as f32);
+                    graphics::draw(ctx, &self.monster_img, DrawParam::default().dest([m.x, m.y]).scale([sx, sy]))?;
+                }
+            }
+            Screen::GameOver => {
+                let (w, h) = graphics::drawable_size(ctx);
+                let title = graphics::Text::new("Game Over");
+                graphics::draw(ctx, &title, DrawParam::default().dest([w / 2.0 - 80.0, h / 4.0]))?;
+
+                // 两个按钮：Restart 和 Quit
+                let btn_w = 140.0;
+                let btn_h = 44.0;
+                let bx = w / 2.0 - btn_w / 2.0;
+                let by = h / 2.0 - btn_h / 2.0;
+                let rect = graphics::Rect::new(bx, by, btn_w, btn_h);
+                let mesh = graphics::Mesh::new_rectangle(ctx, graphics::DrawMode::fill(), rect, graphics::Color::from_rgb(200, 80, 80))?;
+                graphics::draw(ctx, &mesh, DrawParam::default())?;
+                let label = graphics::Text::new("Restart");
+                graphics::draw(ctx, &label, DrawParam::default().dest([bx + 36.0, by + 10.0]))?;
+
+                let bx2 = bx;
+                let by2 = by + btn_h + 12.0;
+                let rect2 = graphics::Rect::new(bx2, by2, btn_w, btn_h);
+                let mesh2 = graphics::Mesh::new_rectangle(ctx, graphics::DrawMode::fill(), rect2, graphics::Color::from_rgb(120, 120, 120))?;
+                graphics::draw(ctx, &mesh2, DrawParam::default())?;
+                let label2 = graphics::Text::new("Quit");
+                graphics::draw(ctx, &label2, DrawParam::default().dest([bx2 + 56.0, by2 + 10.0]))?;
             }
         }
 
@@ -490,6 +605,26 @@ impl event::EventHandler for GameState {
                 let by = 8.0;
                 if x >= bx && x <= bx + btn_w && y >= by && y <= by + btn_h {
                     // 点击退出按钮 -> 结束本局，返回菜单并重置玩家
+                    self.screen = Screen::Menu;
+                    self.reset_player();
+                }
+            }
+            Screen::GameOver => {
+                let (w, h) = graphics::drawable_size(ctx);
+                let btn_w = 140.0;
+                let btn_h = 44.0;
+                let bx = w / 2.0 - btn_w / 2.0;
+                let by = h / 2.0 - btn_h / 2.0;
+                // Restart
+                if x >= bx && x <= bx + btn_w && y >= by && y <= by + btn_h {
+                    self.reset_game();
+                    self.screen = Screen::Playing;
+                    return;
+                }
+                // Quit (下方)
+                let bx2 = bx;
+                let by2 = by + btn_h + 12.0;
+                if x >= bx2 && x <= bx2 + btn_w && y >= by2 && y <= by2 + btn_h {
                     self.screen = Screen::Menu;
                     self.reset_player();
                 }
