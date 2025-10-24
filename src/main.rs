@@ -70,6 +70,8 @@ struct GameState {
     // monsters (enemies)
     monsters: Vec<Monster>,
     monster_img: Image,
+    // menu background
+    menu_img: Image,
 }
 
 // 小怪兽结构体：带有巡逻范围
@@ -117,13 +119,15 @@ impl GameState {
             }
         }
 
-    // 加载资源（确保 resources/stock.png、player.png、special_block.png、coin.png 存在）
+    // 加载资源（确保 resources/stock.png、player.png、special_block.png、coin.png、menu.png 存在）
     let tile_img = Image::new(ctx, "/stock.png")?;
     let player_img = Image::new(ctx, "/player.png")?;
     let special_img = Image::new(ctx, "/special_block.png")?;
     let coin_img = Image::new(ctx, "/coin.png")?;
     // 怪物素材（resources/boast.png）
     let monster_img = Image::new(ctx, "/boast.png")?;
+    // 菜单背景图
+    let menu_img = Image::new(ctx, "/menu_bg.png")?;
 
         let player = Player {
             x: 50.0,
@@ -135,13 +139,22 @@ impl GameState {
             on_ground: false,
         };
 
-        // 在靠近地面的地方生成一个巡逻怪
+        // 在靠近地面的地方生成一个巡逻怪，范围放在地面的中间区域
         let mut monsters = Vec::new();
-        // 找到第一个靠近底部的 tile，用其上方生成怪物
-        if let Some(t) = tiles.iter().find(|t| t.y >= (offset_y + (level.len() as f32 - 1.0) * TILE_SIZE) - 1.0) {
-            let mx = t.x + 4.0;
-            let my = t.y - 24.0;
-            monsters.push(Monster { x: mx, y: my, w: 24.0, h: 24.0, vx: 60.0, range_min: t.x, range_max: t.x + TILE_SIZE * 4.0 });
+        let ground_tiles: Vec<&graphics::Rect> = tiles.iter().filter(|t| t.y >= win_h - TILE_SIZE - 1.0).collect();
+        if !ground_tiles.is_empty() {
+            let idx = ground_tiles.len() / 2;
+            let center_tile = ground_tiles[idx];
+            let center_x = center_tile.x + TILE_SIZE / 2.0;
+            let first_x = ground_tiles.first().unwrap().x;
+            let last_x = ground_tiles.last().unwrap().x + TILE_SIZE;
+            let mut range_min = center_x - TILE_SIZE * 3.0;
+            let mut range_max = center_x + TILE_SIZE * 3.0;
+            if range_min < first_x { range_min = first_x; }
+            if range_max > last_x { range_max = last_x; }
+            let mx = center_x - 12.0; // 居中放置怪物（宽 24）
+            let my = center_tile.y - 24.0;
+            monsters.push(Monster { x: mx, y: my, w: 24.0, h: 24.0, vx: 60.0, range_min, range_max });
         }
 
     // 添加几个特殊方块（示例放在第 3 行和第 4 行的特定列）
@@ -172,6 +185,7 @@ impl GameState {
             consumed_coin_positions: Vec::new(),
             monsters,
             monster_img,
+            menu_img,
         })
     }
 
@@ -202,12 +216,22 @@ impl GameState {
         self.score = 0;
         self.coin_spawn_timer = 0.0;
         self.player = Player { x:50.0, y:50.0, w:24.0, h:30.0, vx:0.0, vy:0.0, on_ground:false };
-        // 重新生成怪物（简单策略：放在第一个底部 tile 上方）
+        // 重新生成怪物（放在地面中间范围）
         self.monsters.clear();
-        if let Some(t) = self.tiles.iter().find(|t| t.y >= (self.level_offset_y + (LEVEL.len() as f32 - 1.0) * TILE_SIZE) - 1.0) {
-            let mx = t.x + 4.0;
-            let my = t.y - 24.0;
-            self.monsters.push(Monster { x: mx, y: my, w: 24.0, h: 24.0, vx: 60.0, range_min: t.x, range_max: t.x + TILE_SIZE * 4.0 });
+        let ground_tiles: Vec<&graphics::Rect> = self.tiles.iter().filter(|t| t.y >= self.level_offset_y + (LEVEL.len() as f32 - 1.0) * TILE_SIZE - 1.0).collect();
+        if !ground_tiles.is_empty() {
+            let idx = ground_tiles.len() / 2;
+            let center_tile = ground_tiles[idx];
+            let center_x = center_tile.x + TILE_SIZE / 2.0;
+            let first_x = ground_tiles.first().unwrap().x;
+            let last_x = ground_tiles.last().unwrap().x + TILE_SIZE;
+            let mut range_min = center_x - TILE_SIZE * 3.0;
+            let mut range_max = center_x + TILE_SIZE * 3.0;
+            if range_min < first_x { range_min = first_x; }
+            if range_max > last_x { range_max = last_x; }
+            let mx = center_x - 12.0;
+            let my = center_tile.y - 24.0;
+            self.monsters.push(Monster { x: mx, y: my, w: 24.0, h: 24.0, vx: 60.0, range_min, range_max });
         }
     }
 
@@ -428,36 +452,67 @@ impl event::EventHandler for GameState {
 
         match self.screen {
             Screen::Menu => {
-                // 菜单背景和标题
-                let title = graphics::Text::new("Super Mario");
+                // 菜单背景和标题（居中、增加副标题和提示）
                 let (w, h) = graphics::drawable_size(ctx);
 
-                // 画标题（靠上）
+                // 绘制菜单背景图（铺满窗口，如果存在）
+                let iw = self.menu_img.width() as f32;
+                let ih = self.menu_img.height() as f32;
+                let sx = w / iw;
+                let sy = h / ih;
+                graphics::draw(ctx, &self.menu_img, DrawParam::default().dest([0.0, 0.0]).scale([sx, sy]))?;
+
+                // 标题文字
+                // let title = graphics::Text::new("Super Mario");
+                // let font = graphics::Font::default();
+                // let title = graphics::Text::new(("Super Mario", font, 48.0));
+                let title = graphics::Text::new(("Super Mario", graphics::Font::default(), 48.0));
+                // 绘制标题阴影以提高可读性
                 graphics::draw(
                     ctx,
                     &title,
-                    DrawParam::default().dest([w / 2.0 - 140.0, h / 4.0]),
+                    DrawParam::default().dest([w / 2.0 - 140.0 + 2.0, h / 6.0 + 2.0]).color(graphics::Color::from_rgba(0, 0, 0, 120)),
+                )?;
+                graphics::draw(
+                    ctx,
+                    &title,
+                    DrawParam::default().dest([w / 2.0 - 140.0, h / 6.0]),
                 )?;
 
-                // Start 按钮位置与尺寸
-                let btn_w = 160.0;
-                let btn_h = 48.0;
+                // Start 按钮位置与尺寸（更宽，更靠下）
+                let btn_w = 220.0;
+                let btn_h = 56.0;
                 let bx = w / 2.0 - btn_w / 2.0;
-                let by = h / 2.0 - btn_h / 2.0;
+                let by = h * 0.55;
 
-                // 按钮矩形
+                // 按钮阴影
+                let rect_shadow = graphics::Rect::new(bx + 4.0, by + 4.0, btn_w, btn_h);
+                let mesh_shadow = graphics::Mesh::new_rectangle(
+                    ctx,
+                    graphics::DrawMode::fill(),
+                    rect_shadow,
+                    graphics::Color::from_rgba(0, 0, 0, 80),
+                )?;
+                graphics::draw(ctx, &mesh_shadow, DrawParam::default())?;
+
+                // 按钮矩形（主色调，稍微圆角可以后续优化）
                 let rect = graphics::Rect::new(bx, by, btn_w, btn_h);
                 let mesh = graphics::Mesh::new_rectangle(
                     ctx,
                     graphics::DrawMode::fill(),
                     rect,
-                    graphics::Color::from_rgb(80, 160, 80),
+                    graphics::Color::from_rgb(46, 125, 50),
                 )?;
                 graphics::draw(ctx, &mesh, DrawParam::default())?;
 
-                // 按钮文字
+                // 按钮文字（居中）
                 let label = graphics::Text::new("START");
-                graphics::draw(ctx, &label, DrawParam::default().dest([bx + 28.0, by + 12.0]))?;
+                // 计算一个靠中文字目的偏移以近似居中
+                graphics::draw(ctx, &label, DrawParam::default().dest([bx + btn_w / 2.0 - 28.0, by + btn_h / 2.0 - 10.0]))?;
+
+                // 开始提示文字
+                let hint = graphics::Text::new("Click START to play");
+                graphics::draw(ctx, &hint, DrawParam::default().dest([w / 2.0 - 80.0, by + btn_h + 12.0]).color(graphics::Color::from_rgb(220, 220, 220)))?;
             }
             Screen::Playing => {
                 // 画瓷砖（使用图片，按 TILE_SIZE 缩放）
@@ -508,11 +563,8 @@ impl event::EventHandler for GameState {
                     )?;
                 }
 
-                // HUD 文本：位置和分数
-                let text = graphics::Text::new(format!(
-                    "pos=({:.0},{:.0}) on_ground={}  score={} ",
-                    self.player.x, self.player.y, self.player.on_ground, self.score
-                ));
+                // HUD 文本：仅显示分数
+                let text = graphics::Text::new(format!("score={}", self.score));
                 graphics::draw(ctx, &text, DrawParam::default().dest([8.0, 8.0]))?;
 
                 // 退出按钮（右上）——现在为“结束当前一把并返回菜单”
@@ -584,13 +636,11 @@ impl event::EventHandler for GameState {
         match self.screen {
             Screen::Menu => {
                 let (w, h) = graphics::drawable_size(ctx);
-                // 如果窗口大小不确定，可用 graphics::drawable_size(ctx) 改为传入 ctx
-                // 这里为了简洁保持和 draw 中一样逻辑：假定使用相同计算方式
-                // 建议若需要精确点击检测可把 ctx 作为参数并调用 graphics::drawable_size(ctx)
-                let btn_w = 160.0;
-                let btn_h = 48.0;
+                // 与 draw 中一致的按钮尺寸与位置
+                let btn_w = 220.0;
+                let btn_h = 56.0;
                 let bx = w / 2.0 - btn_w / 2.0;
-                let by = h / 2.0 - btn_h / 2.0;
+                let by = h * 0.55;
                 if x >= bx && x <= bx + btn_w && y >= by && y <= by + btn_h {
                     // 点击开始按钮 -> 进入游戏
                     self.reset_game();
