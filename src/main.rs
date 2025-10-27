@@ -21,7 +21,7 @@ const LEVEL: [&str; 7] = [
     "...........##...............",
     "..................##........",
     "......##....................",
-    "############################",
+    "#######################P####",
 ];
 
 const SPECIAL_POSITIONS: &[(usize, usize)] = &[(8usize, 2usize), (15usize, 2usize)];
@@ -29,6 +29,7 @@ const SPECIAL_POSITIONS: &[(usize, usize)] = &[(8usize, 2usize), (15usize, 2usiz
 enum Screen {
     Menu,
     GameOver,
+    Victory,
     Playing,
 }
 
@@ -72,6 +73,12 @@ struct GameState {
     monster_img: Image,
     // menu background
     menu_img: Image,
+    // pipe (level goal)
+    pipe_img: Image,
+    pipe_rect: Option<graphics::Rect>,
+    // entering pipe state
+    entering_pipe: bool,
+    enter_timer: f32,
 }
 
 // 小怪兽结构体：带有巡逻范围
@@ -104,17 +111,26 @@ impl GameState {
         // 如果关卡高度比窗口高，offset_y 允许为负，从而保持原始布局
         let offset_y = win_h - level_px_h;
 
+        // 解析地图：'#' 是实心瓷砖，'P' 表示管道（同时作为实心瓷砖）
+        let mut pipe_rect: Option<graphics::Rect> = None;
         for (row, line) in level.iter().enumerate() {
             for (col, ch) in line.chars().enumerate() {
-                if ch == '#' {
+                if ch == '#' || ch == 'P' {
                     let y = offset_y + (row as f32) * TILE_SIZE;
-                    let r = graphics::Rect::new(
-                        col as f32 * TILE_SIZE,
-                        y,
-                        TILE_SIZE,
-                        TILE_SIZE,
-                    );
+                    let r = graphics::Rect::new(col as f32 * TILE_SIZE, y, TILE_SIZE, TILE_SIZE);
                     tiles.push(r);
+                    if ch == 'P' {
+                        // 把管道放在该格子正上方
+                        let pipe_w = TILE_SIZE;
+                        let pipe_h = TILE_SIZE * 1.5;
+                        let px = col as f32 * TILE_SIZE + (TILE_SIZE - pipe_w) / 2.0;
+                        let py = y - pipe_h;
+                        pipe_rect = Some(graphics::Rect::new(px, py, pipe_w, pipe_h));
+                        // 为了让玩家可以站在管道顶部，添加一个薄的碰撞矩形
+                        let top_h = 8.0_f32;
+                        let top_rect = graphics::Rect::new(px, py, pipe_w, top_h);
+                        tiles.push(top_rect);
+                    }
                 }
             }
         }
@@ -128,6 +144,8 @@ impl GameState {
     let monster_img = Image::new(ctx, "/boast.png")?;
     // 菜单背景图
     let menu_img = Image::new(ctx, "/menu_bg.png")?;
+    // 管道素材
+    let pipe_img = Image::new(ctx, "/pipe.png")?;
 
         let player = Player {
             x: 50.0,
@@ -139,7 +157,7 @@ impl GameState {
             on_ground: false,
         };
 
-        // 在靠近地面的地方生成一个巡逻怪，范围放在地面的中间区域
+    // 在靠近地面的地方生成一个巡逻怪，范围放在地面的中间区域
         let mut monsters = Vec::new();
         let ground_tiles: Vec<&graphics::Rect> = tiles.iter().filter(|t| t.y >= win_h - TILE_SIZE - 1.0).collect();
         if !ground_tiles.is_empty() {
@@ -156,6 +174,8 @@ impl GameState {
             let my = center_tile.y - 24.0;
             monsters.push(Monster { x: mx, y: my, w: 24.0, h: 24.0, vx: 60.0, range_min, range_max });
         }
+
+        // 管道位置由地图中 'P' 指定；若未指定，后续逻辑会尝试基于地面创建（见 draw/reset）
 
     // 添加几个特殊方块（示例放在第 3 行和第 4 行的特定列）
     let special_positions = SPECIAL_POSITIONS;
@@ -186,6 +206,10 @@ impl GameState {
             monsters,
             monster_img,
             menu_img,
+            pipe_img,
+            pipe_rect,
+            entering_pipe: false,
+            enter_timer: 0.0,
         })
     }
 
@@ -194,12 +218,25 @@ impl GameState {
         // 重新构建 tiles 与 special_blocks
         self.tiles.clear();
         let level = LEVEL;
+        // 解析地图以重建 tiles（同时处理 'P' 管道）
+        self.pipe_rect = None;
         for (row, line) in level.iter().enumerate() {
             for (col, ch) in line.chars().enumerate() {
-                if ch == '#' {
+                if ch == '#' || ch == 'P' {
                     let y = self.level_offset_y + (row as f32) * TILE_SIZE;
                     let r = graphics::Rect::new(col as f32 * TILE_SIZE, y, TILE_SIZE, TILE_SIZE);
                     self.tiles.push(r);
+                    if ch == 'P' {
+                        let pipe_w = TILE_SIZE;
+                        let pipe_h = TILE_SIZE * 1.5;
+                        let px = col as f32 * TILE_SIZE + (TILE_SIZE - pipe_w) / 2.0;
+                        let py = y - pipe_h;
+                        self.pipe_rect = Some(graphics::Rect::new(px, py, pipe_w, pipe_h));
+                        // 同样为 pipe 添加顶部薄的碰撞矩形，便于玩家站在管道上
+                        let top_h = 8.0_f32;
+                        let top_rect = graphics::Rect::new(px, py, pipe_w, top_h);
+                        self.tiles.push(top_rect);
+                    }
                 }
             }
         }
@@ -216,6 +253,22 @@ impl GameState {
         self.score = 0;
         self.coin_spawn_timer = 0.0;
         self.player = Player { x:50.0, y:50.0, w:24.0, h:30.0, vx:0.0, vy:0.0, on_ground:false };
+        // reset pipe state and recompute pipe_rect based on current tiles
+        self.entering_pipe = false;
+        self.enter_timer = 0.0;
+        // If the map explicitly specified a pipe ('P'), keep it. Otherwise compute a fallback
+        if self.pipe_rect.is_none() {
+            // place pipe at rightmost ground tile (bottom row) as fallback
+            let ground_tiles: Vec<&graphics::Rect> = self.tiles.iter().filter(|t| t.y >= self.level_offset_y + (LEVEL.len() as f32 - 1.0) * TILE_SIZE - 1.0).collect();
+            if !ground_tiles.is_empty() {
+                let last = ground_tiles.last().unwrap();
+                let pipe_w = TILE_SIZE;
+                let pipe_h = TILE_SIZE * 1.5;
+                let px = last.x + (TILE_SIZE - pipe_w) / 2.0;
+                let py = last.y - pipe_h;
+                self.pipe_rect = Some(graphics::Rect::new(px, py, pipe_w, pipe_h));
+            }
+        }
         // 重新生成怪物（放在地面中间范围）
         self.monsters.clear();
         let ground_tiles: Vec<&graphics::Rect> = self.tiles.iter().filter(|t| t.y >= self.level_offset_y + (LEVEL.len() as f32 - 1.0) * TILE_SIZE - 1.0).collect();
@@ -266,12 +319,35 @@ impl event::EventHandler for GameState {
             Screen::Menu => {
                 // 菜单无每帧逻辑（可加入动画）
             }
+            Screen::Victory => {
+                // Victory 屏幕暂停游戏逻辑
+            }
             Screen::GameOver => {
                 // 游戏结束时暂停一切游戏逻辑
             }
             Screen::Playing => {
                 let dt = timer::delta(ctx).as_secs_f32();
                 let (_win_w, win_h) = graphics::drawable_size(ctx);
+
+                // 若正在进入管道，则播放缓慢滑入动画并在结束后切换到 Victory
+                if self.entering_pipe {
+                    if let Some(pipe) = self.pipe_rect {
+                        // 让玩家水平靠拢到管道中心并缓慢下滑
+                        let target_x = pipe.x + pipe.w / 2.0 - self.player.w / 2.0;
+                        // 平滑靠近
+                        let dx = target_x - self.player.x;
+                        self.player.x += dx * (0.1 + dt * 3.0);
+                        // 缓慢下滑
+                        self.player.y += 40.0 * dt;
+                        self.enter_timer += dt;
+                        if self.enter_timer > 1.2 || self.player.y > pipe.y + pipe.h * 0.5 {
+                            self.screen = Screen::Victory;
+                        }
+                        return Ok(());
+                    } else {
+                        self.entering_pipe = false;
+                    }
+                }
 
                 // 输入
                 let mut move_x = 0.0;
@@ -385,6 +461,23 @@ impl event::EventHandler for GameState {
                     self.player.y = h - self.player.h;
                     self.player.vy = 0.0;
                     self.player.on_ground = true;
+                }
+
+                // 检测玩家是否真正站在管道顶部（水平中心在管道范围内且玩家底部与管道顶对齐）以触发进入管道
+                if let Some(pipe) = self.pipe_rect {
+                    let px_center = self.player.x + self.player.w / 2.0;
+                    if px_center >= pipe.x && px_center <= pipe.x + pipe.w {
+                        let player_bottom = self.player.y + self.player.h;
+                        // 仅在玩家底部与管道顶接近（容差）且被判定为着地时才触发进入
+                        let tol = 6.0_f32;
+                        if (player_bottom - pipe.y).abs() <= tol && self.player.on_ground {
+                            // 开始进入管道动画
+                            self.entering_pipe = true;
+                            self.enter_timer = 0.0;
+                            // 锁定横向移动
+                            self.player.vx = 0.0;
+                        }
+                    }
                 }
 
                 // 固定帧率
@@ -516,7 +609,14 @@ impl event::EventHandler for GameState {
             }
             Screen::Playing => {
                 // 画瓷砖（使用图片，按 TILE_SIZE 缩放）
+                // 如果某个瓷砖与管道重叠，则不绘制该瓷砖（保留碰撞体），以便直接看到管道
                 for tile in &self.tiles {
+                    // 若是与管道相交则跳过绘制
+                    if let Some(pipe) = self.pipe_rect {
+                        if GameState::rect_intersect(tile, &pipe) {
+                            continue;
+                        }
+                    }
                     let sx = TILE_SIZE / (self.tile_img.width() as f32);
                     let sy = TILE_SIZE / (self.tile_img.height() as f32);
                     graphics::draw(
@@ -526,6 +626,30 @@ impl event::EventHandler for GameState {
                             .dest([tile.x, tile.y])
                             .scale([sx, sy]),
                     )?;
+                }
+
+                //如果 pipe_rect 尚未生成（例如重置后），就在绘制阶段根据窗口和 tiles 计算它
+                if self.pipe_rect.is_none() {
+                    let (win_w, _win_h) = graphics::drawable_size(ctx);
+                    let ground_tiles: Vec<&graphics::Rect> = self.tiles.iter().filter(|t| t.y >= self.level_offset_y + (LEVEL.len() as f32 - 1.0) * TILE_SIZE - 1.0).collect();
+                    if !ground_tiles.is_empty() {
+                        let chosen = ground_tiles.iter().rev().find(|t| t.x + TILE_SIZE <= win_w).or_else(|| ground_tiles.last());
+                        if let Some(last) = chosen {
+                            let pipe_w = TILE_SIZE;
+                            let pipe_h = TILE_SIZE * 1.5;
+                            // center above the chosen ground tile
+                            let px = last.x + (TILE_SIZE - pipe_w) / 2.0;
+                            let py = last.y - pipe_h;
+                            self.pipe_rect = Some(graphics::Rect::new(px, py, pipe_w, pipe_h));
+                        }
+                    }
+                }
+
+                // 绘制管道（若存在） — 放在玩家之前，以便玩家显示在管道前方
+                if let Some(pipe) = self.pipe_rect {
+                    let psx = pipe.w / (self.pipe_img.width() as f32);
+                    let psy = pipe.h / (self.pipe_img.height() as f32);
+                    graphics::draw(ctx, &self.pipe_img, DrawParam::default().dest([pipe.x, pipe.y]).scale([psx, psy]))?;
                 }
 
                 // 画玩家（使用图片，按 player.w/player.h 缩放）
@@ -591,10 +715,35 @@ impl event::EventHandler for GameState {
                     graphics::draw(ctx, &self.monster_img, DrawParam::default().dest([m.x, m.y]).scale([sx, sy]))?;
                 }
             }
+            Screen::Victory => {
+                let (w, h) = graphics::drawable_size(ctx);
+                // 半透明遮罩
+                let overlay = graphics::Mesh::new_rectangle(ctx, graphics::DrawMode::fill(), graphics::Rect::new(0.0, 0.0, w, h), graphics::Color::from_rgba(0, 0, 0, 140))?;
+                graphics::draw(ctx, &overlay, DrawParam::default())?;
+
+                // 胜利文字
+                let title = graphics::Text::new(("You Win!", graphics::Font::default(), 56.0));
+                graphics::draw(ctx, &title, DrawParam::default().dest([w / 2.0 - 120.0, h / 4.0]))?;
+
+                // 分数
+                let score_text = graphics::Text::new((format!("Score: {}", self.score), graphics::Font::default(), 28.0));
+                graphics::draw(ctx, &score_text, DrawParam::default().dest([w / 2.0 - 60.0, h / 2.6]))?;
+
+                // 返回主菜单按钮
+                let btn_w = 180.0;
+                let btn_h = 44.0;
+                let bx = w / 2.0 - btn_w / 2.0;
+                let by = h * 0.6;
+                let rect = graphics::Rect::new(bx, by, btn_w, btn_h);
+                let mesh = graphics::Mesh::new_rectangle(ctx, graphics::DrawMode::fill(), rect, graphics::Color::from_rgb(46, 125, 50))?;
+                graphics::draw(ctx, &mesh, DrawParam::default())?;
+                let label = graphics::Text::new("MENU");
+                graphics::draw(ctx, &label, DrawParam::default().dest([bx + btn_w / 2.0 - 20.0, by + btn_h / 2.0 - 10.0]))?;
+            }
             Screen::GameOver => {
                 let (w, h) = graphics::drawable_size(ctx);
-                let title = graphics::Text::new("Game Over");
-                graphics::draw(ctx, &title, DrawParam::default().dest([w / 2.0 - 80.0, h / 4.0]))?;
+                let title = graphics::Text::new(("Game Over", graphics::Font::default(), 48.0));
+                graphics::draw(ctx, &title, DrawParam::default().dest([w / 2.0 - 100.0, h / 4.0]))?;
 
                 // 两个按钮：Restart 和 Quit
                 let btn_w = 140.0;
@@ -675,6 +824,17 @@ impl event::EventHandler for GameState {
                 let bx2 = bx;
                 let by2 = by + btn_h + 12.0;
                 if x >= bx2 && x <= bx2 + btn_w && y >= by2 && y <= by2 + btn_h {
+                    self.screen = Screen::Menu;
+                    self.reset_player();
+                }
+            }
+            Screen::Victory => {
+                let (w, h) = graphics::drawable_size(ctx);
+                let btn_w = 180.0;
+                let btn_h = 44.0;
+                let bx = w / 2.0 - btn_w / 2.0;
+                let by = h * 0.6;
+                if x >= bx && x <= bx + btn_w && y >= by && y <= by + btn_h {
                     self.screen = Screen::Menu;
                     self.reset_player();
                 }
