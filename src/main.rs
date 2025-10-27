@@ -79,6 +79,7 @@ struct GameState {
     // entering pipe state
     entering_pipe: bool,
     enter_timer: f32,
+    bg_img: Image,
 }
 
 // 小怪兽结构体：带有巡逻范围
@@ -146,6 +147,7 @@ impl GameState {
     let menu_img = Image::new(ctx, "/menu_bg.png")?;
     // 管道素材
     let pipe_img = Image::new(ctx, "/pipe.png")?;
+    let bg_img = Image::new(ctx, "/bg.png")?;
 
         let player = Player {
             x: 50.0,
@@ -200,7 +202,7 @@ impl GameState {
             coin_img,
             score: 0,
             coin_spawn_timer: 0.0,
-            coin_spawn_interval: 5.0,
+            coin_spawn_interval: 0.5,
             level_offset_y: offset_y,
             consumed_coin_positions: Vec::new(),
             monsters,
@@ -210,6 +212,7 @@ impl GameState {
             pipe_rect,
             entering_pipe: false,
             enter_timer: 0.0,
+            bg_img,
         })
     }
 
@@ -608,6 +611,14 @@ impl event::EventHandler for GameState {
                 graphics::draw(ctx, &hint, DrawParam::default().dest([w / 2.0 - 80.0, by + btn_h + 12.0]).color(graphics::Color::from_rgb(220, 220, 220)))?;
             }
             Screen::Playing => {
+                // 绘制背景
+                let (w, h) = graphics::drawable_size(ctx);
+                let iw = self.bg_img.width() as f32;
+                let ih = self.bg_img.height() as f32;
+                let sx = w / iw;
+                let sy = h / ih;
+                graphics::draw(ctx, &self.bg_img, DrawParam::default().dest([0.0, 0.0]).scale([sx, sy]))?;
+
                 // 画瓷砖（使用图片，按 TILE_SIZE 缩放）
                 // 如果某个瓷砖与管道重叠，则不绘制该瓷砖（保留碰撞体），以便直接看到管道
                 for tile in &self.tiles {
